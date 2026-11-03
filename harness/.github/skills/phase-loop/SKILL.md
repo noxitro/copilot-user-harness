@@ -25,21 +25,29 @@ description: Use when asked to run, advance, resume or re-review a phase of HARN
    を渡して委譲し、定型報告(変更ファイル / テストコードの変更 / 外部 API の根拠 / ビルド・テスト /
    自己検証 / 未解決事項)を受け取ります。報告が定型でなければ定型で出し直させます。
    実装役が「止めて報告」してきたら、続行させずにその内容を私に伝えて判断を待ってください。
-3. **審査前の差分を採取**: 次の 3 つを `e2e-artifacts/` に保存してください。どのコマンドにも末尾に
-   `-- . ":(exclude)e2e-artifacts"` を付けて、証拠の置き場を外します(外さないと、ここに保存する採取結果や
-   審査役の証拠で、`.gitignore` に入っていない配布先では審査の前後が必ず食い違います)。
-   - `git diff HEAD` の出力 → `phase-N-before-review.diff`
-   - `git status --porcelain` の出力 → `phase-N-before-review.status`
-   - 未追跡ファイルの中身のハッシュ → `phase-N-before-review.untracked`。`git ls-files --others --exclude-standard` で
-     一覧を取り、その全ファイルを `git hash-object -- <ファイル…>` に渡した出力を、ファイル名と 1 行ずつ並べて保存する
+3. **審査前の差分を採取**: リポジトリのルートで次を実行してください(Windows 以外では `pwsh -File …`)。
+   `git diff HEAD`・`git status --porcelain`・未追跡ファイルの中身のハッシュを、証拠の置き場を除いて
+   `e2e-artifacts/phase-N-before-review.snapshot` に保存します。
 
-   未追跡ファイルは diff に出ず、status も「??」のまま変わらないので、中身のハッシュが要ります。
+   ```text
+   powershell -NoProfile -ExecutionPolicy Bypass -File .github/skills/phase-loop/snapshot.ps1 -Phase N -Stage before
+   ```
+
+   - 終了コード 3 は、`HARNESS.md` のテストディレクトリに追加以外の変更(書き換え・削除・名前の変更)があるという意味です。
+     **審査に進まず**、出力をそのまま私に伝えてください。私が承認して TEST_REPORT.md の承認記録に書いたら手順 4 へ、
+     承認しなければ「テストの変更を戻す」を修正項目にして手順 6 の差し戻しをします(1 周に数えます)。
+   - 終了コード 2 は失敗です。出力を私に伝えてください。
+   - PowerShell が無いときだけ、同じものを手で採ります。`git diff HEAD`・`git status --porcelain`・
+     `git ls-files --others --exclude-standard` の全ファイルを `git hash-object -- <ファイル…>` に渡した出力を、
+     どのコマンドにも末尾に `-- . ":(exclude)e2e-artifacts"` を付けて、上のファイルに並べて保存します
+     (未追跡ファイルは diff に出ず、status も「??」のまま変わらないので、中身のハッシュが要ります)。
 4. **レビュー依頼**: カスタムエージェント `reviewer` に「フェーズ番号・ゲート条件・実装役の未解決事項・外部 API の根拠欄」を渡して委譲し、
    テストディレクトリの差分確認・自分で測り直し・陽性コントロール・意地悪テストを経た VERDICT を受け取ります。
    実装役の報告の写しや TEST_REPORT.md の引用を証拠として受け取らないでください。
-5. **審査後の差分を採取して比較**: 手順 3 と同じ 3 つを `phase-N-after-review.diff` / `.status` / `.untracked` として保存し、
-   `.diff` 同士・`.status` 同士・`.untracked` 同士を `git diff --no-index <before> <after>` で比較してください。
-   どれかに差分があれば**その VERDICT は無効**です。何が変わったかを私に報告し、
+5. **審査後の差分を採取して比較**: 手順 3 と同じコマンドを `-Stage after` で実行してください。
+   `e2e-artifacts/phase-N-after-review.snapshot` に保存し、審査前と比べます(手で採ったときは、2 つのファイルを
+   `git diff --no-index <before> <after>` で比べます)。
+   終了コード 1(不一致)なら**その VERDICT は無効**です。出力に出る「何が変わったか」を私に報告し、
    作業ツリーを審査前に戻してから(戻し方は私が指示します)、手順 3 からやり直してください。
    変わったのがビルドやテストが毎回作り直すファイル(生成物・キャッシュ・カバレッジなど)なら、
    `.gitignore` に足すことを私に提案してください(足さないと、何度やり直しても食い違います)。

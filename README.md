@@ -26,7 +26,7 @@ GitHub Copilot で「実装役が書き、審査役が確かめ、合格した�
 | 置き場 | 中身 | 配布先での置き場 |
 | --- | --- | --- |
 | `harness/.github/agents/` | 実装役 `implementer.agent.md`、審査役 `reviewer.agent.md` | `.github/agents/` |
-| `harness/.github/skills/phase-loop/` | 1 フェーズを回す起動手順(Copilot CLI とそれを基盤とする面のスキル) | `.github/skills/phase-loop/` |
+| `harness/.github/skills/phase-loop/` | 1 フェーズを回す起動手順(Copilot CLI とそれを基盤とする面のスキル)と、審査の前後に作業ツリーを採取して比べる `snapshot.ps1` | `.github/skills/phase-loop/` |
 | `harness/.github/prompts/` | 同じ起動手順(VS Code / VS 2026 用のプロンプトファイル) | `.github/prompts/` |
 | `harness/.github/extensions/phase-gate/` | 同じ段取りをコードで固定したワークフロー版(dynamic workflows はプレビュー機能)。`-Workflow` を付けたときだけ配る | `.github/extensions/phase-gate/` |
 | `harness/HARNESS.md` | 役割・流れ・運用ルール・ゲート条件の枠(種) | ルート |
@@ -123,7 +123,7 @@ install.bat ..\my-app -Check
 ## 部品を直すとき
 
 - 起動手順はスキル(`harness/.github/skills/phase-loop/SKILL.md`)とプロンプト(`harness/.github/prompts/phase-loop.prompt.md`)の 2 本があり、
-  本文は同じです。直すときは両方を直します(違うのは frontmatter とフェーズ番号の受け取り方だけ)。
+  本文は同じです。直すときは両方を直します(違うのは frontmatter とフェーズ番号の受け取り方だけ。`npm test` が食い違いを見つけます)。
 - 段取りを変えたら、ワークフロー版(`harness/.github/extensions/phase-gate/extension.mjs`)も合わせます。
 - 部品を変えたら `VERSION` を上げ、テストを回します。
 
@@ -131,8 +131,8 @@ install.bat ..\my-app -Check
 npm test
 ```
 
-テストは AI クレジットを使いません。ワークフロー版の段取りの分岐(偽の実行環境)と、導入スクリプトの動き(一時フォルダへの配布)を確かめます。
-導入スクリプトのテストは Windows でだけ動きます。
+テストは AI クレジットを使いません。ワークフロー版の段取りの分岐(偽の実行環境)、導入スクリプトの動き(一時フォルダへの配布)、
+`snapshot.ps1` の採取と比較、スキルとプロンプトの本文の一致を確かめます。導入スクリプトと `snapshot.ps1` のテストは Windows でだけ動きます。
 
 ## ライセンス
 

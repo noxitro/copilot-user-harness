@@ -1,5 +1,5 @@
 // phase-gate: phase-loop(スキル)と同じ段取りを、dynamic workflows のコードで固定したもの。
-// 置き場: リポジトリの .github/extensions/phase-gate/extension.mjs(使い方は同じフォルダの README.md)。
+// 置き場: リポジトリの .github/extensions/phase-gate/extension.mjs(置き方と回し方は https://github.com/noxitro/copilot-user-harness の docs/phase-gate.md)。
 // 前提: HARNESS.md(ルート)、.github/agents/implementer.agent.md と reviewer.agent.md、docs/TEST_REPORT.md。
 // 下の定数だけをリポジトリに合わせて直す。段取り(周回の数え方・止まる所)は変えない。
 import { defineWorkflow, joinSession } from "@github/copilot-sdk/extension";
@@ -10,6 +10,9 @@ import { join } from "node:path";
 
 const MAX_ROUNDS = 3; // 審査の差し戻しの上限(4 周目は始めない)
 const MAX_FORMAT_RETRIES = 2; // 実装役の報告が定型にならないときの出し直しの回数
+// 1 回の実行で起こすサブエージェントの上限(meta.limits に渡す)。超えると実行ごと失敗して記録案も出ない
+// (既報: failure.type "workflow_limit_reached"。公式の文書では未確認)ので、超える前にチェックポイントで止める
+const MAX_SUBAGENTS = 12;
 const ART = "e2e-artifacts"; // 証拠の置き場(HARNESS.md の「証拠の置き場」と同じにする。gitignore 対象)
 const READ_ALSO = ["GOAL.md"]; // HARNESS.md と一緒に読ませる文書(ルートにあるものだけ渡す)
 const PROTECTED = []; // 触ってはいけないファイル(例: /^src\/generated\//)。締めで変更の有無を見せる
@@ -108,6 +111,16 @@ function agentModel(name) {
     return m ? m[1] : "(本体と同じ)";
 }
 
+// HARNESS.md の「環境」節の「テストディレクトリ: `tests/`」(`…` を並べれば複数)。{{ }} のままなら空
+function testDirsOf(harness) {
+    const line = (section(harness, /^## 環境/) ?? "").split("\n").find((l) => l.includes("テストディレクトリ"));
+    if (!line) return [];
+    const rest = line.slice(line.indexOf("テストディレクトリ"));
+    return [...rest.matchAll(/`([^`]+)`/g)]
+        .map((m) => m[1].trim().replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/*$/, "/"))
+        .filter((d) => d !== "/" && d !== "./" && !/\{\{|[*?[]/.test(d));
+}
+
 function prepare(n) {
     if (!existsSync(path("HARNESS.md"))) {
         throw new Error(`HARNESS.md が作業フォルダ(${root()})に無い。リポジトリのルートで実行する。`);
@@ -128,7 +141,7 @@ function prepare(n) {
         prior = [unver, prevLines].filter(Boolean).join("\n").trim();
     }
     return {
-        gates, prior, docs, startedAt: new Date().toISOString(),
+        gates, prior, docs, startedAt: new Date().toISOString(), testDirs: testDirsOf(harness),
         title: phaseSec.split("\n")[0].replace(/^#+\s*/, ""),
         implementerModel: agentModel("implementer"), reviewerModel: agentModel("reviewer"),
     };
@@ -154,10 +167,19 @@ function changedFiles() {
         const e = entries[i];
         if (!e) continue;
         const code = e.slice(0, 2);
-        out.push({ code, file: e.slice(3) });
-        if (/[RC]/.test(code)) i++; // 名前の変更・コピーは、次の欄が元の名前
+        const entry = { code, file: e.slice(3) };
+        if (/[RC]/.test(code)) entry.from = entries[++i]; // 名前の変更・コピーは、次の欄が元の名前
+        out.push(entry);
     }
     return out;
+}
+const formatEntry = (e) => `${e.code} ${e.from ? `${e.from} -> ` : ""}${e.file}`;
+
+// テストディレクトリの、追加以外の変更(書き換え・削除・名前の変更。移した先がテストディレクトリの外でも拾う)。
+// テストの追加は FAIL の対象ではないので見ない
+function isTestChange(e, dirs) {
+    if (e.code === "??" || e.code[0] === "A") return false;
+    return [e.file, e.from].some((f) => f && dirs.some((d) => f.startsWith(d)));
 }
 
 // 推測の語は審査役自身の文章だけで見る。コードブロックと `…` の中(生出力・テスト名など)は対象にしない
@@ -283,7 +305,7 @@ const phaseGate = defineWorkflow({
             required: ["phase"],
             properties: { phase: { type: "integer" } },
         },
-        limits: { maxTotalSubagents: 12, maxConcurrentSubagents: 1 },
+        limits: { maxTotalSubagents: MAX_SUBAGENTS, maxConcurrentSubagents: 1 },
     },
     run: async (ctx) => {
         const n = parsePhase(ctx.args);
@@ -302,8 +324,9 @@ const phaseGate = defineWorkflow({
         };
 
         ctx.phase("準備");
-        const prep = await ctx.step("prepare-v2", () => prepare(n));
+        const prep = await ctx.step("prepare-v3", () => prepare(n));
         ctx.log(`Phase ${n}: ${prep.title} 開始 ${prep.startedAt}`);
+        if (!prep.testDirs.length) ctx.log("HARNESS.md の「環境」節にテストディレクトリが書かれていない。テストの変更はコードでは見ない(審査役だけが見る)。");
         const priorText = prep.prior ? `\n\n前フェーズの未解決・未検証項目(観点。証拠ではない):\n${prep.prior}` : "";
         const readDocs = prep.docs.join(" と ");
 
@@ -316,6 +339,22 @@ const phaseGate = defineWorkflow({
         let finalVerdict = null;
         let finalImpl = null;
         const accepted = []; // 人が「採用」で引き受けた判定(記録の備考に残す)
+        const acceptedTests = new Set(); // 人が承認したテストの変更(変更の一覧と差分のハッシュ)
+        let approvedTests = ""; // 審査役に渡す、人が承認したテストの変更
+        const trajectory = () => history.map((h) => `周 ${h.round}: ${h.verdict}\n${h.items.map((i) => `  - ${i}`).join("\n")}`).join("\n");
+
+        // サブエージェントの数は、再開で再生される呼び出しも含めて数える(上限に近い側に倒す)
+        let spawned = 0;
+        const callAgent = (prompt, opts) => { spawned++; return ctx.agent(prompt, opts); };
+        const stopAtLimit = async () => {
+            await checkpoint("subagent-limit", `サブエージェントの上限(${MAX_SUBAGENTS})に達した(この実行では続けられない)`,
+                `この実行で起こしたサブエージェント: ${spawned}。次を呼ぶと上限を超えて実行ごと失敗するので、その前に止めた。\n` +
+                "作業ツリーはそのまま残っている。resume すると記録案を出して終わる。続けるなら、同じフェーズで新しい実行を始める" +
+                "(実装役は今の作業ツリーから始める)。\n\n" +
+                `周回ごとの判定の推移:\n${trajectory() || "(審査の判定はまだ無い)"}`);
+            return await record(ctx, n, prep, history.length, "中断(サブエージェント上限)",
+                `指摘の推移: ${history.map((h) => `${h.round}:${h.items.length}件`).join(" ") || "なし"}`, null, checkpoint);
+        };
         const reportFormat = "agent 定義の報告形式で、構造化出力(schema)として報告する。止めるべき状況なら stopped=true と stopReason を書く。";
 
         while (round < MAX_ROUNDS) {
@@ -334,7 +373,8 @@ const phaseGate = defineWorkflow({
             for (let t = 0; t <= MAX_FORMAT_RETRIES; t++) {
                 const prompt = t === 0 ? implPrompt
                     : `${implPrompt}\n\n前回の報告は形式不備(${formatErr})。作業ツリーの現状を確認し、再実装せずに定型報告を出し直す。`;
-                impl = await ctx.agent(prompt, { agent: "implementer", schema: implSchema, label: `implementer:${attempts}:t${t}` });
+                if (spawned >= MAX_SUBAGENTS) return await stopAtLimit();
+                impl = await callAgent(prompt, { agent: "implementer", schema: implSchema, label: `implementer:${attempts}:t${t}` });
                 if (impl === null) break; // 失敗(上限・接続・枠切れなど)は null で返る。出し直しても同じなので止まる
                 formatErr = checkImpl(impl);
                 if (!formatErr) break;
@@ -359,6 +399,37 @@ const phaseGate = defineWorkflow({
                 continue;
             }
 
+            // テストディレクトリの追加以外の変更は、審査役の注意力に頼らず、審査の前にコードで止める
+            const tc = await ctx.step(`test-changes-${attempts}`, () => {
+                const list = changedFiles().filter((e) => isTestChange(e, prep.testDirs));
+                if (!list.length) return { list: [], key: "", diff: "" };
+                const files = list.flatMap((e) => [e.file, e.from].filter(Boolean));
+                const diff = git(["-c", "core.quotePath=false", "diff", "HEAD", "--", ...files]);
+                const lines = list.map(formatEntry);
+                return { list: lines, key: createHash("sha256").update(`${lines.join("\n")}\n${diff}`).digest("hex"), diff };
+            });
+            if (tc.list.length && !acceptedTests.has(tc.key)) {
+                const dirs = prep.testDirs.join(" ");
+                const testNote = await checkpoint(`test-changed-${attempts}`, "テストディレクトリに追加以外の変更がある(既定で FAIL)",
+                    `テストディレクトリ(HARNESS.md の「環境」節): ${dirs}\n\n変更(追加は除く):\n${tc.list.join("\n")}\n\n差分(先頭):\n${tc.diff.slice(0, 3000)}\n\n` +
+                    "人が承認するなら、docs/TEST_REPORT.md の「テスト変更の承認記録」に行を足し、" +
+                    `${ART}/phase-${n}-human-note-test-changed-${attempts}.md の 1 行目に「採用」と書いて resume する(審査に進む)。\n` +
+                    "それ以外で resume すると、テストの変更を戻すよう実装役に差し戻す(1 周に数える。note に書いたことは人の指示として渡す)。");
+                if (humanAccepts(testNote)) {
+                    acceptedTests.add(tc.key);
+                    accepted.push(`テストの変更を人が承認(${attempts})`);
+                    ctx.log(`[採用] ${accepted[accepted.length - 1]}`);
+                    approvedTests = `テストディレクトリの次の変更は、人がチェックポイント test-changed-${attempts} で承認した` +
+                        `(承認記録の行が今回の差分で足されていても、人が書いたものとして扱う):\n${tc.list.join("\n")}\n\n`;
+                } else {
+                    const item = `テストディレクトリ(${dirs})の追加以外の変更を戻す: ${tc.list.join(", ")}`;
+                    history.push({ round, verdict: "FAIL(テストの変更。審査の前にコードで検出)", items: [item] });
+                    fixItems = formatFix([{ priority: 1, item, reproduction: `git status --porcelain -- ${dirs} と git diff HEAD -- ${dirs} で、追加以外の変更が無いことを確かめる` }]);
+                    notes = testNote;
+                    continue;
+                }
+            }
+
             // 審査前後の差分を比べる。違えば無効にして人に見せる
             let review = null;
             let valid = false;
@@ -379,10 +450,12 @@ const phaseGate = defineWorkflow({
                     (previousFixItems
                         ? `これは再審査。前回 FAIL にした次の項目は、前回の再現手順をそのまま再実行して閉じる(差分を読むだけで PASS にしない):\n${previousFixItems}\n\n`
                         : "") +
+                    approvedTests +
                     "実装役の報告の文章や docs/TEST_REPORT.md は証拠ではない。自分で測り直し、生出力を証拠にする。" +
                     "生出力はコードブロック(```)に入れる。" +
                     "agent 定義の報告形式の全文を reportText に入れ、構造化出力(schema)で返す。";
-                review = await ctx.agent(reviewPrompt, { agent: "reviewer", schema: reviewSchema, label: `reviewer:${tag}` });
+                if (spawned >= MAX_SUBAGENTS) return await stopAtLimit();
+                review = await callAgent(reviewPrompt, { agent: "reviewer", schema: reviewSchema, label: `reviewer:${tag}` });
 
                 const after = await ctx.step(`after-review-v2-${tag}`, () => {
                     const s = snapshot();
@@ -445,8 +518,7 @@ const phaseGate = defineWorkflow({
 
         // 上限到達(4 周目は始めない)
         if (!finalVerdict) {
-            const trajectory = history.map((h) => `周 ${h.round}: ${h.verdict}\n${h.items.map((i) => `  - ${i}`).join("\n")}`).join("\n");
-            await checkpoint("max-rounds", `${MAX_ROUNDS} 周で PASS しなかった(${MAX_ROUNDS + 1} 周目は始めない)`, `周回ごとの指摘の推移:\n${trajectory}\n\nフェーズ分割か要件の見直しを人が決める。`);
+            await checkpoint("max-rounds", `${MAX_ROUNDS} 周で PASS しなかった(${MAX_ROUNDS + 1} 周目は始めない)`, `周回ごとの指摘の推移:\n${trajectory()}\n\nフェーズ分割か要件の見直しを人が決める。`);
             return await record(ctx, n, prep, history.length, "上限到達", `指摘の推移: ${history.map((h) => `${h.round}:${h.items.length}件`).join(" ")}`, null, checkpoint);
         }
 
@@ -457,9 +529,15 @@ const phaseGate = defineWorkflow({
         const reported = new Set((finalImpl.changedFiles ?? []).map((f) => f.split(/\s+[—–]\s+|\s+-\s+/)[0].trim().replace(/^`|`$/g, "").replace(/\\/g, "/").replace(/^\.\//, "")));
         const unreported = changed.filter((f) => !reported.has(f));
         const protectedTouched = changed.filter((f) => PROTECTED.some((re) => re.test(f)));
+        const testTouched = entries.filter((e) => isTestChange(e, prep.testDirs)).map(formatEntry);
+        const testLine = prep.testDirs.length
+            ? `テストディレクトリ(${prep.testDirs.join(" ")})の追加以外の変更:\n${testTouched.join("\n") || "(なし)"}` +
+              (testTouched.length ? "\n(人が test-changed で承認したもの。TEST_REPORT.md の承認記録に行があることを確かめる)" : "")
+            : "テストディレクトリ: HARNESS.md の「環境」節に書かれていないので、テストの変更はコードでは見ていない。";
         const closing =
             `差分の一覧(git status --porcelain -uall。${ART}/ は除く):\n${status || "(なし)"}\n\n` +
             `実装役の報告に無い変更ファイル(スコープ逸脱の候補):\n${unreported.join("\n") || "(なし)"}\n\n` +
+            `${testLine}\n\n` +
             (PROTECTED.length ? `触ってはいけないファイルの変更:\n${protectedTouched.join("\n") || "(なし)"}\n\n` : "") +
             `審査結果(審査役の出力そのまま):\n${formatReview(finalVerdict)}\n\n` +
             "コミットはしない。TEST_REPORT.md の更新案と phase-log.csv の追記案は、resume 後に e2e-artifacts/ へ差分として出す。\n" +

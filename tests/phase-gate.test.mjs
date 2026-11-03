@@ -1,5 +1,5 @@
 // phase-gate の段取りを、偽の実行環境で通しで確かめる(AI クレジットを使わない)。
-// 実行: リポジトリのルートで `npm test`(node --test tests/)。雛形は harness/ から読む。
+// 実行: リポジトリのルートで `npm test`。雛形は harness/ から読む。
 // 偽の実行環境は SDK の文書の決まりに合わせる: step は記録して再生する(volatile は毎回実行)、
 // agent は同じ呼び出しを 1 回にまとめ、失敗は null で返す、pause は初回に止まり、再開すると同じ所から返る。
 import { test } from "node:test";
@@ -32,10 +32,17 @@ function git(cwd, ...args) {
 }
 
 // 雛形から試験用のリポジトリを作る
-function makeRepo({ crlfReport = false, goal = false, reviewerModel = null, gitignore = true } = {}) {
+function makeRepo({ crlfReport = false, goal = false, reviewerModel = null, gitignore = true, testDir = false } = {}) {
     const repo = mkdtempSync(join(scratch, "repo-"));
     git(repo, "init", "-q");
-    cpSync(join(harnessDir, "HARNESS.md"), join(repo, "HARNESS.md"));
+    let harness = readFileSync(join(harnessDir, "HARNESS.md"), "utf8");
+    if (testDir) {
+        harness = harness.replace("(テストディレクトリ: `{{tests/}}`)", "(テストディレクトリ: `tests/`、`./spec`)");
+        assert.ok(harness.includes("テストディレクトリ: `tests/`"), "雛形の「環境」節の書き方が変わった");
+        mkdirSync(join(repo, "tests"));
+        writeFileSync(join(repo, "tests", "a.test.js"), "assert(1 === 1);\n");
+    }
+    writeFileSync(join(repo, "HARNESS.md"), harness);
     mkdirSync(join(repo, "docs"));
     let report = readFileSync(join(harnessDir, "docs", "TEST_REPORT.md"), "utf8").replace(/\r\n/g, "\n");
     if (crlfReport) report = report.replace(/\n/g, "\r\n");
@@ -376,4 +383,78 @@ test("フェーズ番号が不正なら始めない", async () => {
     }
     await assert.rejects(drive(repo, { phase: 99 }, { implementer: () => implOk(), reviewer: () => review("PASS") }), /Phase 99 の節/);
     assert.equal(existsSync(art(repo, "phase-99-checkpoint-closing.md")), false);
+});
+
+const testFile = (repo) => join(repo, "tests", "a.test.js");
+
+test("テストディレクトリの書き換えは、審査の前に止め、人が承認しなければ実装役に戻させる(1 周に数える)", async () => {
+    const repo = makeRepo({ testDir: true });
+    let impls = 0;
+    const { result, calls, pauses } = await drive(repo, { phase: 1 }, {
+        implementer: ({ repo }) => {
+            if (++impls === 1) writeFileSync(testFile(repo), "// assert(1 === 2);\n");
+            else git(repo, "checkout", "--", "tests/a.test.js");
+            appendReadme(repo, "行");
+            return implOk();
+        },
+        reviewer: () => review("PASS"),
+    }, writeMinutes(1));
+    assert.deepEqual(pauses, ["cp:test-changed-1", "cp:closing"]);
+    const cp = readFileSync(art(repo, "phase-1-checkpoint-test-changed-1.md"), "utf8");
+    assert.match(cp, /M tests\/a\.test\.js/);
+    assert.match(cp, /-assert\(1 === 1\);/, "差分を見せる");
+    assert.match(cp, /tests\/ spec\//, "HARNESS.md の複数のテストディレクトリを読む");
+    assert.deepEqual(calls.map((c) => c.agent), ["implementer", "implementer", "reviewer"], "審査役は書き換えた版を審査しない");
+    assert.match(calls[1].prompt, /差し戻し修正[\s\S]*追加以外の変更を戻す:  M tests\/a\.test\.js/);
+    assert.equal(result.rounds, 2);
+    assert.equal(result.verdict, "PASS");
+});
+
+test("テストディレクトリの書き換えを人が「採用」すれば審査に進み、審査役に承認済みと伝え、締めと記録に残す", async () => {
+    const repo = makeRepo({ testDir: true });
+    const { result, calls, pauses } = await drive(repo, { phase: 1 }, {
+        implementer: ({ repo }) => { writeFileSync(testFile(repo), "assert(1 === 1, '理由を足した');\n"); return implOk({ changedFiles: ["tests/a.test.js"] }); },
+        reviewer: () => review("PASS"),
+    }, (key, repo) => {
+        if (key === "cp:test-changed-1") writeFileSync(art(repo, "phase-1-human-note-test-changed-1.md"), "採用。承認記録に足した\n");
+        writeMinutes(1)(key, repo);
+    });
+    assert.deepEqual(pauses, ["cp:test-changed-1", "cp:closing"]);
+    assert.match(calls[1].prompt, /人がチェックポイント test-changed-1 で承認した[\s\S]*M tests\/a\.test\.js/);
+    assert.match(readFileSync(art(repo, "phase-1-checkpoint-closing.md"), "utf8"), /追加以外の変更:\n M tests\/a\.test\.js/);
+    assert.equal(result.rounds, 1);
+    assert.match(result.phaseLogRow, /テストの変更を人が承認\(1\)/);
+});
+
+test("テストの追加では止めない。テストディレクトリの外へ移したら拾う", async () => {
+    const repo = makeRepo({ testDir: true });
+    const added = await drive(repo, { phase: 1 }, {
+        implementer: ({ repo }) => { writeFileSync(join(repo, "tests", "b.test.js"), "assert(true);\n"); return implOk({ changedFiles: ["tests/b.test.js"] }); },
+        reviewer: () => review("PASS"),
+    }, writeMinutes(1));
+    assert.deepEqual(added.pauses, ["cp:closing"]);
+
+    const repo2 = makeRepo({ testDir: true });
+    const moved = await drive(repo2, { phase: 1 }, {
+        implementer: ({ repo }) => { git(repo, "mv", "tests/a.test.js", "old-a.test.js"); return implOk(); },
+        reviewer: () => review("PASS"),
+    }, (key, repo) => {
+        if (key === "cp:test-changed-1") writeFileSync(art(repo, "phase-1-human-note-test-changed-1.md"), "採用\n");
+        writeMinutes(1)(key, repo);
+    });
+    assert.equal(moved.pauses[0], "cp:test-changed-1");
+    assert.match(readFileSync(art(repo2, "phase-1-checkpoint-test-changed-1.md"), "utf8"), /R {2}tests\/a\.test\.js -> old-a\.test\.js/);
+});
+
+test("サブエージェントの上限に届く前に止め、記録案を出して終わる(上限を超えて呼ばない)", async () => {
+    const repo = makeRepo();
+    const { result, calls, pauses } = await drive(repo, { phase: 1 }, {
+        implementer: ({ repo }) => { appendReadme(repo, "行"); return implOk(); },
+        reviewer: () => null,
+    }, writeMinutes(1));
+    assert.equal(calls.length, 12);
+    assert.equal(pauses.filter((k) => k.startsWith("cp:review-null-")).length, 11);
+    assert.ok(pauses.includes("cp:subagent-limit"));
+    assert.equal(result.verdict, "中断(サブエージェント上限)");
+    assert.match(result.phaseLogRow, /中断\(サブエージェント上限\)/);
 });

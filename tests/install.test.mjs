@@ -42,7 +42,8 @@ test("初回: 部品と種を置き、管理ファイルを書く。ワークフ
     assert.equal(r.code, 0, r.out);
     for (const p of [
         [".github", "agents", "implementer.agent.md"], [".github", "agents", "reviewer.agent.md"],
-        [".github", "skills", "phase-loop", "SKILL.md"], [".github", "prompts", "phase-loop.prompt.md"],
+        [".github", "skills", "phase-loop", "SKILL.md"], [".github", "skills", "phase-loop", "snapshot.ps1"],
+        [".github", "prompts", "phase-loop.prompt.md"],
         ["HARNESS.md"], ["docs", "TEST_REPORT.md"], ["docs", "acceptance-checklist.md"],
     ]) assert.ok(existsSync(at(dir, ...p)), p.join("/"));
     assert.ok(!existsSync(extension(dir)));
