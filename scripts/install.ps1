@@ -57,17 +57,40 @@ $versionFile = Join-Path $Root 'VERSION'
 if (Test-Path $versionFile) { $version = ([string]([IO.File]::ReadAllText($versionFile))).Trim() }
 if (-not $version) { $version = '0.0.0' }
 
+# Get-FileHash は使わない。pwsh 7 から起動されると PSModulePath が 7 の Modules を指したまま引き継がれ、
+# Windows PowerShell 5.1 では Get-FileHash が見つからなくなる。
 function Get-Hash([string]$path) {
-  return (Get-FileHash -Algorithm SHA256 -Path $path).Hash
+  $sha = [Security.Cryptography.SHA256]::Create()
+  $stream = [IO.File]::OpenRead($path)
+  try { return ([BitConverter]::ToString($sha.ComputeHash($stream))) -replace '-', '' }
+  finally { $stream.Dispose(); $sha.Dispose() }
+}
+
+# 管理ファイルの相対パスが、配布先の .github\ の中を指すか。管理ファイルは配布先のリポジトリにあり誰でも書き換えられるので、
+# 外を指す値(絶対パス、..、: を含むもの)で配布先の外のファイルを消さないよう、読んだ時点で落とす。
+$targetPrefix = $Target.TrimEnd('\') + '\'
+# パスに使えない文字があると .NET Framework の Path のメソッドは例外を投げるので、それも「外を指す」として扱う。
+function Test-ManagedPath([string]$rel) {
+  try {
+    if (-not $rel -or $rel.Contains(':') -or [IO.Path]::IsPathRooted($rel)) { return $false }
+    if (-not $rel.StartsWith('.github\')) { return $false }
+    if (($rel -split '[\\/]') -contains '..') { return $false }
+    $full = [IO.Path]::GetFullPath((Join-Path $Target $rel))
+    return $full.StartsWith($targetPrefix, [StringComparison]::OrdinalIgnoreCase)
+  }
+  catch { return $false }
 }
 
 # 既存の管理ファイルを読む
 $recorded = @{}
 $recordedWorkflow = $false
+$rejected = New-Object System.Collections.Generic.List[string]
 if (Test-Path $manifestPath) {
   $m = Get-Content $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
   if ($m.workflow) { $recordedWorkflow = $true }
-  foreach ($prop in $m.files.PSObject.Properties) { $recorded[$prop.Name] = $prop.Value }
+  foreach ($prop in $m.files.PSObject.Properties) {
+    if (Test-ManagedPath $prop.Name) { $recorded[$prop.Name] = $prop.Value } else { $rejected.Add($prop.Name) }
+  }
 }
 $useWorkflow = ($Workflow -or $recordedWorkflow)
 
@@ -90,6 +113,7 @@ $seeds = @(
 
 $actions = New-Object System.Collections.Generic.List[string]
 $warnings = New-Object System.Collections.Generic.List[string]
+foreach ($r in $rejected) { $warnings.Add("無視した(管理ファイルのパスが .github\ の外を指している): $r") }
 $newManifest = New-Object System.Collections.Specialized.OrderedDictionary
 
 function Remove-EmptyDirs([string]$dir) {

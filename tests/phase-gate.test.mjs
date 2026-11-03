@@ -263,6 +263,24 @@ test("審査の前後で作業ツリーが変わったら、その判定を無�
     assert.equal(result.verdict, "PASS");
 });
 
+test("実装役が足した未追跡のファイルを審査役が書き換えても、その判定を無効にする", async () => {
+    const repo = makeRepo();
+    let reviews = 0;
+    const { pauses, calls, result } = await drive(repo, { phase: 1 }, {
+        implementer: ({ repo }) => { writeFileSync(join(repo, "added.txt"), "実装役が足した\n"); return implOk(); },
+        reviewer: ({ repo }) => {
+            if (++reviews === 1) writeFileSync(join(repo, "added.txt"), "審査役が書き換えた\n");
+            return review("PASS");
+        },
+    }, (key, repo) => {
+        if (key === "cp:diff-changed-1-a1") writeFileSync(join(repo, "added.txt"), "実装役が足した\n");
+        writeMinutes(1)(key, repo);
+    });
+    assert.ok(pauses.includes("cp:diff-changed-1-a1"));
+    assert.equal(calls.filter((c) => c.agent === "reviewer").length, 2);
+    assert.equal(result.verdict, "PASS");
+});
+
 test("推測の語(はず)を含む PASS は数えず再審査する。「はずれ」には反応しない", async () => {
     const repo = makeRepo();
     let reviews = 0;

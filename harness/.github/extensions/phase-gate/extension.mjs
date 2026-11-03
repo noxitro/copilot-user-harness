@@ -4,6 +4,7 @@
 // 下の定数だけをリポジトリに合わせて直す。段取り(周回の数え方・止まる所)は変えない。
 import { defineWorkflow, joinSession } from "@github/copilot-sdk/extension";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -133,8 +134,12 @@ function prepare(n) {
     };
 }
 
+// 未追跡のファイルは diff に出ず、status も「??」のまま変わらないので、中身のハッシュも並べる(gitignore 対象は除く)
 function snapshot() {
-    return `${git(["diff", "HEAD"])}\n--- git status --porcelain ---\n${git(["status", "--porcelain"])}`;
+    const untracked = git(["ls-files", "--others", "--exclude-standard", "-z"]).split("\0").filter(Boolean).sort();
+    const hashes = untracked.map((f) => `${createHash("sha256").update(readFileSync(path(f))).digest("hex")}  ${f}`).join("\n");
+    return `${git(["diff", "HEAD"])}\n--- git status --porcelain ---\n${git(["status", "--porcelain"])}` +
+        `\n--- untracked (sha256) ---\n${hashes}\n`;
 }
 
 function checkImpl(r) {

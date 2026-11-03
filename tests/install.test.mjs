@@ -3,6 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -16,12 +17,15 @@ test.after(() => rmSync(scratch, { recursive: true, force: true }));
 
 // 出力はコンソールのコードページで出るので、UTF-8 に切り替えてから呼ぶ(install.bat の chcp 65001 と同じ状態)。
 // 引数は単一引用符で包む(一時フォルダのパスと - で始まるスイッチだけを渡す)。
-function install(target, ...args) {
+// スクリプトが例外で止まると $LASTEXITCODE が設定されないので、そのときは 1 で返す(install.bat の -File と同じ)。
+function installWith(env, target, ...args) {
     const quoted = [script, target].map((a) => `'${a}'`).concat(args).join(" ");
-    const command = `[Console]::OutputEncoding = [Text.Encoding]::UTF8; & ${quoted}; exit $LASTEXITCODE`;
-    const r = spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command], { encoding: "utf8" });
+    const command = `[Console]::OutputEncoding = [Text.Encoding]::UTF8; $global:LASTEXITCODE = 0; ` +
+        `try { & ${quoted} } catch { Write-Output $_; exit 1 }; exit $LASTEXITCODE`;
+    const r = spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command], { encoding: "utf8", env });
     return { code: r.status, out: `${r.stdout}${r.stderr}` };
 }
+const install = (target, ...args) => installWith(process.env, target, ...args);
 function target({ gitignore = true } = {}) {
     const dir = mkdtempSync(join(scratch, "repo-"));
     if (gitignore) writeFileSync(join(dir, ".gitignore"), "node_modules/\ne2e-artifacts/\n");
@@ -121,4 +125,34 @@ test("手で置かれた同名の部品は上書きしない", { skip }, () => {
     assert.equal(r.code, 2, r.out);
     assert.match(r.out, /スキップ\(手で置かれたファイル/);
     assert.equal(readFileSync(agent(dir), "utf8"), "前からあった\n");
+});
+
+test("pwsh 7 から起動されて PSModulePath が 7 の Modules を指していても動く", { skip }, () => {
+    // pwsh 7 は自分の Modules を PSModulePath の先頭に置いたまま子プロセスへ渡す。その状態を再現する
+    const pwshModules = join(process.env.ProgramFiles ?? "", "PowerShell", "7", "Modules");
+    const env = { ...process.env, PSModulePath: `${pwshModules};${process.env.PSModulePath ?? ""}` };
+    const dir = target();
+    const r = installWith(env, dir);
+    assert.equal(r.code, 0, r.out);
+    assert.ok(existsSync(agent(dir)));
+});
+
+test("管理ファイルのパスが配布先の外を指していたら、そのファイルを消さずに無視する", { skip }, () => {
+    const dir = target();
+    install(dir);
+    const name = `outside-${Date.now()}.txt`;
+    const outside = join(dirname(dir), name);
+    writeFileSync(outside, "配布先の外\n");
+    const m = manifest(dir);
+    // ハッシュを本物に合わせ、「手で編集されている」で残る逃げ道を塞ぐ(install.ps1 と同じ大文字の 16 進)
+    const h = createHash("sha256").update(readFileSync(outside)).digest("hex").toUpperCase();
+    const bad = [`..\\${name}`, `.github\\..\\..\\${name}`, `.github/../../${name}`, outside, `.github\\"<>|${name}`];
+    for (const k of bad) m.files[k] = h;
+    writeFileSync(at(dir, ".github", "copilot-user-harness.json"), JSON.stringify(m));
+    const r = install(dir, "-Remove");
+    assert.equal(r.code, 2, r.out);
+    assert.equal((r.out.match(/無視した\(管理ファイルのパスが/g) ?? []).length, bad.length, r.out);
+    assert.ok(existsSync(outside), "配布先の外のファイルが残っている");
+    assert.ok(!existsSync(agent(dir)), "配布先の中の部品は消えている");
+    rmSync(outside);
 });

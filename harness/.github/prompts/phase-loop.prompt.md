@@ -24,16 +24,19 @@ HARNESS.md の **Phase ${input:phase}**(以下 N)を、フェーズゲート方�
    を渡して委譲し、定型報告(変更ファイル / テストコードの変更 / 外部 API の根拠 / ビルド・テスト /
    自己検証 / 未解決事項)を受け取ります。報告が定型でなければ定型で出し直させます。
    実装役が「止めて報告」してきたら、続行させずにその内容を私に伝えて判断を待ってください。
-3. **審査前の差分を採取**: `git diff HEAD > e2e-artifacts/phase-N-before-review.diff` と
-   `git status --porcelain > e2e-artifacts/phase-N-before-review.status` を実行し、保存してください
-   (未追跡ファイルの追加は diff に出ないので、status も要ります)。
+3. **審査前の差分を採取**: 次の 3 つを `e2e-artifacts/` に保存してください。
+   - `git diff HEAD` の出力 → `phase-N-before-review.diff`
+   - `git status --porcelain` の出力 → `phase-N-before-review.status`
+   - 未追跡ファイルの中身のハッシュ → `phase-N-before-review.untracked`。`git ls-files --others --exclude-standard` で
+     一覧を取り、その全ファイルを `git hash-object -- <ファイル…>` に渡した出力を、ファイル名と 1 行ずつ並べて保存する
+
+   未追跡ファイルは diff に出ず、status も「??」のまま変わらないので、中身のハッシュが要ります。
 4. **レビュー依頼**: カスタムエージェント `reviewer` に「フェーズ番号・ゲート条件・実装役の未解決事項・外部 API の根拠欄」を渡して委譲し、
    テストディレクトリの差分確認・自分で測り直し・陽性コントロール・意地悪テストを経た VERDICT を受け取ります。
    実装役の報告の写しや TEST_REPORT.md の引用を証拠として受け取らないでください。
-5. **審査後の差分を採取して比較**: `git diff HEAD > e2e-artifacts/phase-N-after-review.diff` と
-   `git status --porcelain > e2e-artifacts/phase-N-after-review.status` を実行し、
-   `.diff` 同士と `.status` 同士を `git diff --no-index <before> <after>` で比較してください。
-   どちらかに差分があれば**その VERDICT は無効**です。何が変わったかを私に報告し、
+5. **審査後の差分を採取して比較**: 手順 3 と同じ 3 つを `phase-N-after-review.diff` / `.status` / `.untracked` として保存し、
+   `.diff` 同士・`.status` 同士・`.untracked` 同士を `git diff --no-index <before> <after>` で比較してください。
+   どれかに差分があれば**その VERDICT は無効**です。何が変わったかを私に報告し、
    作業ツリーを審査前に戻してから(戻し方は私が指示します)、手順 3 からやり直してください。
 6. **FAIL なら差し戻し**: 審査役の修正項目(再現手順付き)をそのまま `implementer` に渡して
    修正させ、手順 3〜5 を経て `reviewer` に「前回の再現手順をそのまま再実行して閉じる」よう
