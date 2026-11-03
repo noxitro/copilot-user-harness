@@ -1,0 +1,32 @@
+# npm test を Windows と Linux で回す。AI クレジットは使わない。
+# 導入スクリプトと snapshot.ps1 のテストは Windows でだけ動く(Linux では skip になる)。
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      # README の「必要なもの」に合わせ、下限の Node.js 22 で確かめる
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - run: npm test

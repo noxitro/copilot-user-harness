@@ -154,6 +154,9 @@ npm test
 テストは AI クレジットを使いません。ワークフロー版の段取りの分岐(偽の実行環境)、導入スクリプトの動き(一時フォルダへの配布)、
 `snapshot.ps1` の採取と比較、スキルとプロンプトの本文の一致を確かめます。導入スクリプトと `snapshot.ps1` のテストは Windows でだけ動きます。
 
+GitHub では、`main` への push と pull request のたびに、同じ `npm test` が Windows と Linux(Node.js 22)で回ります
+(`.github/workflows/test.yml`。Actions タブから手で回すこともできます)。
+
 ## ライセンス
 
 [MIT](LICENSE)
