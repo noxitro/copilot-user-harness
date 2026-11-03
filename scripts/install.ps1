@@ -59,11 +59,15 @@ if (-not $version) { $version = '0.0.0' }
 
 # Get-FileHash は使わない。pwsh 7 から起動されると PSModulePath が 7 の Modules を指したまま引き継がれ、
 # Windows PowerShell 5.1 では Get-FileHash が見つからなくなる。
+# CRLF は LF にそろえてから測る。配布先を core.autocrlf=true で clone すると部品が CRLF で取り出され、
+# 生のバイトで比べると全部が「手で編集された」扱いになって更新が止まる。
+# 部品の原本は LF(.gitattributes)なので、そろえても LF のファイルのハッシュは前の版と変わらない。
+$latin1 = [Text.Encoding]::GetEncoding(28591) # バイトと 1 対 1 で往復できる
 function Get-Hash([string]$path) {
+  $text = $latin1.GetString([IO.File]::ReadAllBytes($path)).Replace("`r`n", "`n")
   $sha = [Security.Cryptography.SHA256]::Create()
-  $stream = [IO.File]::OpenRead($path)
-  try { return ([BitConverter]::ToString($sha.ComputeHash($stream))) -replace '-', '' }
-  finally { $stream.Dispose(); $sha.Dispose() }
+  try { return ([BitConverter]::ToString($sha.ComputeHash($latin1.GetBytes($text)))) -replace '-', '' }
+  finally { $sha.Dispose() }
 }
 
 # 管理ファイルの相対パスが、配布先の .github\ の中を指すか。管理ファイルは配布先のリポジトリにあり誰でも書き換えられるので、
@@ -85,6 +89,7 @@ function Test-ManagedPath([string]$rel) {
 $recorded = @{}
 $recordedWorkflow = $false
 $rejected = New-Object System.Collections.Generic.List[string]
+$m = $null
 if (Test-Path $manifestPath) {
   $m = Get-Content $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
   if ($m.workflow) { $recordedWorkflow = $true }
@@ -212,7 +217,18 @@ else {
   }
   if (-not $ignored) { $warnings.Add('.gitignore に e2e-artifacts/ が無い。証拠の置き場なので足すこと') }
 
-  if (-not $Check) {
+  # 中身(版・ワークフローの有無・部品とハッシュ)が前回と同じなら管理ファイルを書き直さない。
+  # installedAt だけが変わって、配布先に「変更なし」なのに差分が出るのを防ぐ
+  $manifestSame = $false
+  if ($m -and $rejected.Count -eq 0 -and [string]$m.harnessVersion -eq $version -and
+      [bool]$m.workflow -eq [bool]$useWorkflow -and $recorded.Count -eq $newManifest.Count) {
+    $manifestSame = $true
+    foreach ($k in $newManifest.Keys) {
+      if (-not $recorded.ContainsKey($k) -or $recorded[$k] -ne $newManifest[$k]) { $manifestSame = $false; break }
+    }
+  }
+
+  if (-not $Check -and -not $manifestSame) {
     $files = New-Object System.Collections.Specialized.OrderedDictionary
     foreach ($k in $newManifest.Keys) { $files.Add($k, $newManifest[$k]) }
     $manifest = [ordered]@{

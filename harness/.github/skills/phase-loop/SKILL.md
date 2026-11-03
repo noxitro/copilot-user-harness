@@ -25,7 +25,9 @@ description: Use when asked to run, advance, resume or re-review a phase of HARN
    を渡して委譲し、定型報告(変更ファイル / テストコードの変更 / 外部 API の根拠 / ビルド・テスト /
    自己検証 / 未解決事項)を受け取ります。報告が定型でなければ定型で出し直させます。
    実装役が「止めて報告」してきたら、続行させずにその内容を私に伝えて判断を待ってください。
-3. **審査前の差分を採取**: 次の 3 つを `e2e-artifacts/` に保存してください。
+3. **審査前の差分を採取**: 次の 3 つを `e2e-artifacts/` に保存してください。どのコマンドにも末尾に
+   `-- . ":(exclude)e2e-artifacts"` を付けて、証拠の置き場を外します(外さないと、ここに保存する採取結果や
+   審査役の証拠で、`.gitignore` に入っていない配布先では審査の前後が必ず食い違います)。
    - `git diff HEAD` の出力 → `phase-N-before-review.diff`
    - `git status --porcelain` の出力 → `phase-N-before-review.status`
    - 未追跡ファイルの中身のハッシュ → `phase-N-before-review.untracked`。`git ls-files --others --exclude-standard` で
@@ -39,6 +41,8 @@ description: Use when asked to run, advance, resume or re-review a phase of HARN
    `.diff` 同士・`.status` 同士・`.untracked` 同士を `git diff --no-index <before> <after>` で比較してください。
    どれかに差分があれば**その VERDICT は無効**です。何が変わったかを私に報告し、
    作業ツリーを審査前に戻してから(戻し方は私が指示します)、手順 3 からやり直してください。
+   変わったのがビルドやテストが毎回作り直すファイル(生成物・キャッシュ・カバレッジなど)なら、
+   `.gitignore` に足すことを私に提案してください(足さないと、何度やり直しても食い違います)。
 6. **FAIL なら差し戻し**: 審査役の修正項目(再現手順付き)をそのまま `implementer` に渡して
    修正させ、手順 3〜5 を経て `reviewer` に「前回の再現手順をそのまま再実行して閉じる」よう
    再レビューさせます。これを**最大 3 周**まで。
@@ -61,7 +65,8 @@ description: Use when asked to run, advance, resume or re-review a phase of HARN
 守ること:
 
 - 実装役と審査役を同じチャットの自分で兼ねない。必ずカスタムエージェント `implementer` / `reviewer` に委譲する。
-- 「おそらく」「はず」を含む結果を PASS に数えない。
+- 審査役自身の文章に「おそらく」「はず」を含む結果を PASS に数えない(コードブロックに入った生出力やテスト名は対象外)。
+  推測ではないと私が判断したときだけ数える。
 - 審査役の判定文を書き換えない。要約するときも VERDICT の語と FAIL の項目数は変えない。
 - 自分の文脈に実装の詳細を溜めない。渡すものは渡し、受け取るものは報告だけにする。
 - 途中で判断に迷ったら、選択肢を並べて私に聞く。推測で進めない。

@@ -32,7 +32,7 @@ function git(cwd, ...args) {
 }
 
 // 雛形から試験用のリポジトリを作る
-function makeRepo({ crlfReport = false, goal = false, reviewerModel = null } = {}) {
+function makeRepo({ crlfReport = false, goal = false, reviewerModel = null, gitignore = true } = {}) {
     const repo = mkdtempSync(join(scratch, "repo-"));
     git(repo, "init", "-q");
     cpSync(join(harnessDir, "HARNESS.md"), join(repo, "HARNESS.md"));
@@ -47,7 +47,7 @@ function makeRepo({ crlfReport = false, goal = false, reviewerModel = null } = {
     writeFileSync(join(repo, ".github", "agents", "reviewer.agent.md"), reviewer);
     if (goal) writeFileSync(join(repo, "GOAL.md"), "# ゴール\n\n試験用。\n");
     writeFileSync(join(repo, "README.md"), "# 試験用\n");
-    writeFileSync(join(repo, ".gitignore"), "e2e-artifacts/\n");
+    if (gitignore) writeFileSync(join(repo, ".gitignore"), "e2e-artifacts/\n");
     git(repo, "add", "-A");
     git(repo, "commit", "-q", "-m", "init");
     return repo;
@@ -259,6 +259,7 @@ test("審査の前後で作業ツリーが変わったら、その判定を無�
         writeMinutes(1)(key, repo);
     });
     assert.ok(pauses.includes("cp:diff-changed-1-a1"));
+    assert.match(readFileSync(art(repo, "phase-1-checkpoint-diff-changed-1-a1.md"), "utf8"), /stray\.txt/, "何が変わったかを見せる");
     assert.equal(calls.filter((c) => c.agent === "reviewer").length, 2);
     assert.equal(result.verdict, "PASS");
 });
@@ -292,6 +293,67 @@ test("推測の語(はず)を含む PASS は数えず再審査する。「はず
     }, writeMinutes(1));
     assert.deepEqual(pauses, ["cp:hedge-1-a1", "cp:closing"]);
     assert.equal(result.verdict, "PASS");
+});
+
+test("推測の語は審査役自身の文章だけで見る(コードブロックと `…` の中は見ない)", async () => {
+    const repo = makeRepo();
+    const { pauses, result, calls } = await drive(repo, { phase: 1 }, {
+        implementer: ({ repo }) => { appendReadme(repo, "行"); return implOk(); },
+        reviewer: () => review("PASS", { reportText: "テストの生出力:\n```\n✔ 0 件ならヘッダだけになるはず\n```\n`はず` を含むテスト名も自分で実行した" }),
+    }, writeMinutes(1));
+    assert.deepEqual(pauses, ["cp:closing"]);
+    assert.equal(result.verdict, "PASS");
+    assert.match(calls[1].prompt, /生出力はコードブロック/);
+});
+
+test("推測の語のチェックポイントで人が「採用」と書けば、再審査せずにその判定を数え、備考に残す", async () => {
+    const repo = makeRepo();
+    const { pauses, result, calls } = await drive(repo, { phase: 1 }, {
+        implementer: ({ repo }) => { appendReadme(repo, "行"); return implOk(); },
+        reviewer: () => review("PASS", { reportText: "陽性コントロールでも検出できるはずです" }),
+    }, (key, repo) => {
+        if (key === "cp:hedge-1-a1") writeFileSync(art(repo, "phase-1-human-note-hedge-1-a1.md"), "\n採用。固有の語なので推測ではない\n");
+        writeMinutes(1)(key, repo);
+    });
+    assert.deepEqual(pauses, ["cp:hedge-1-a1", "cp:closing"]);
+    assert.equal(calls.filter((c) => c.agent === "reviewer").length, 1, "採用したら再審査しない");
+    assert.equal(result.verdict, "PASS");
+    assert.match(result.phaseLogRow, /推測の語を含む PASS を人が採用\(1-a1\)/);
+});
+
+test(".gitignore に e2e-artifacts/ が無くても、証拠の置き場への書き込みで判定を無効にしない", async () => {
+    const repo = makeRepo({ gitignore: false });
+    const { pauses, result } = await drive(repo, { phase: 1 }, {
+        implementer: ({ repo }) => { appendReadme(repo, "行"); return implOk(); },
+        reviewer: ({ repo }) => {
+            mkdirSync(join(repo, "e2e-artifacts"), { recursive: true });
+            writeFileSync(art(repo, "phase-1-log.txt"), "証拠");
+            return review("PASS");
+        },
+    }, writeMinutes(1));
+    assert.deepEqual(pauses, ["cp:closing"]);
+    assert.equal(result.verdict, "PASS");
+    const lists = readFileSync(art(repo, "phase-1-checkpoint-closing.md"), "utf8").split("審査結果(")[0];
+    assert.doesNotMatch(lists, /\be2e-artifacts\/(?!\s*は除く)/, "締めの照合にも出さない");
+});
+
+test("締めの照合: 日本語の名前を崩さず、新しいフォルダの中も 1 件ずつ見る", async () => {
+    const repo = makeRepo();
+    const { result } = await drive(repo, { phase: 1 }, {
+        implementer: ({ repo }) => {
+            writeFileSync(join(repo, "メモ.txt"), "報告した\n");
+            mkdirSync(join(repo, "新しい"));
+            writeFileSync(join(repo, "新しい", "a.txt"), "報告した\n");
+            writeFileSync(join(repo, "新しい", "b.txt"), "報告していない\n");
+            return implOk({ changedFiles: ["メモ.txt — 足した", "`新しい/a.txt` — 足した"] });
+        },
+        reviewer: () => review("PASS"),
+    }, writeMinutes(1));
+    const closing = readFileSync(art(repo, "phase-1-checkpoint-closing.md"), "utf8");
+    const unreported = closing.split("実装役の報告に無い変更ファイル")[1].split("\n\n")[0];
+    assert.match(unreported, /新しい\/b\.txt/);
+    assert.doesNotMatch(unreported, /メモ\.txt|新しい\/a\.txt|新しい\/$/m);
+    assert.match(result.phaseLogRow, /逸脱候補: 1件/);
 });
 
 test("Phase 0 を受け付け、GOAL.md があれば読ませ、CRLF の TEST_REPORT.md でも 1 行だけ変える", async () => {

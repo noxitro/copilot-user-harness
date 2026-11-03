@@ -134,13 +134,36 @@ function prepare(n) {
     };
 }
 
+// 証拠の置き場は、gitignore に入っていなくても差分の採取と締めの照合から外す。
+// 外さないと、ワークフロー自身や審査役が書く証拠で審査の前後が必ず食い違い、判定が毎回無効になる
+const EXCEPT_ART = ["--", ".", `:(exclude)${ART}`];
+
 // 未追跡のファイルは diff に出ず、status も「??」のまま変わらないので、中身のハッシュも並べる(gitignore 対象は除く)
 function snapshot() {
-    const untracked = git(["ls-files", "--others", "--exclude-standard", "-z"]).split("\0").filter(Boolean).sort();
+    const untracked = git(["ls-files", "--others", "--exclude-standard", "-z", ...EXCEPT_ART]).split("\0").filter(Boolean).sort();
     const hashes = untracked.map((f) => `${createHash("sha256").update(readFileSync(path(f))).digest("hex")}  ${f}`).join("\n");
-    return `${git(["diff", "HEAD"])}\n--- git status --porcelain ---\n${git(["status", "--porcelain"])}` +
+    return `${git(["diff", "HEAD", ...EXCEPT_ART])}\n--- git status --porcelain ---\n${git(["status", "--porcelain", ...EXCEPT_ART])}` +
         `\n--- untracked (sha256) ---\n${hashes}\n`;
 }
+
+// 締めで照合する変更ファイル。-z なら日本語などの名前が引用符と 8 進数で崩れず、-uall なら新しいフォルダの中も 1 件ずつ出る
+function changedFiles() {
+    const entries = git(["-c", "core.quotePath=false", "status", "--porcelain", "-z", "-uall", ...EXCEPT_ART]).split("\0");
+    const out = [];
+    for (let i = 0; i < entries.length; i++) {
+        const e = entries[i];
+        if (!e) continue;
+        const code = e.slice(0, 2);
+        out.push({ code, file: e.slice(3) });
+        if (/[RC]/.test(code)) i++; // 名前の変更・コピーは、次の欄が元の名前
+    }
+    return out;
+}
+
+// 推測の語は審査役自身の文章だけで見る。コードブロックと `…` の中(生出力・テスト名など)は対象にしない
+const ownWords = (text) => String(text ?? "").replace(/```[\s\S]*?```/g, "").replace(/`[^`\n]*`/g, "");
+// 人のメモの最初の行が「採用」なら、そのチェックポイントの判定を人が引き受けたとみなす
+const humanAccepts = (note) => /^\s*採用/.test(String(note ?? "").split(/\r?\n/).find((l) => l.trim()) ?? "");
 
 function checkImpl(r) {
     const blank = ["testCodeChanges", "externalApiEvidence", "buildTest", "selfVerification"].filter((k) => !String(r[k] ?? "").trim());
@@ -292,6 +315,7 @@ const phaseGate = defineWorkflow({
         const history = [];
         let finalVerdict = null;
         let finalImpl = null;
+        const accepted = []; // 人が「採用」で引き受けた判定(記録の備考に残す)
         const reportFormat = "agent 定義の報告形式で、構造化出力(schema)として報告する。止めるべき状況なら stopped=true と stopReason を書く。";
 
         while (round < MAX_ROUNDS) {
@@ -341,7 +365,7 @@ const phaseGate = defineWorkflow({
             for (let attempt = 1; !valid; attempt++) {
                 ctx.phase("審査");
                 const tag = `${attempts}-a${attempt}`;
-                const before = await ctx.step(`before-review-${tag}`, () => {
+                const before = await ctx.step(`before-review-v2-${tag}`, () => {
                     const s = snapshot();
                     writeArtifact(`phase-${n}-before-review-${tag}.diff`, s);
                     return s;
@@ -356,10 +380,11 @@ const phaseGate = defineWorkflow({
                         ? `これは再審査。前回 FAIL にした次の項目は、前回の再現手順をそのまま再実行して閉じる(差分を読むだけで PASS にしない):\n${previousFixItems}\n\n`
                         : "") +
                     "実装役の報告の文章や docs/TEST_REPORT.md は証拠ではない。自分で測り直し、生出力を証拠にする。" +
+                    "生出力はコードブロック(```)に入れる。" +
                     "agent 定義の報告形式の全文を reportText に入れ、構造化出力(schema)で返す。";
                 review = await ctx.agent(reviewPrompt, { agent: "reviewer", schema: reviewSchema, label: `reviewer:${tag}` });
 
-                const after = await ctx.step(`after-review-${tag}`, () => {
+                const after = await ctx.step(`after-review-v2-${tag}`, () => {
                     const s = snapshot();
                     writeArtifact(`phase-${n}-after-review-${tag}.diff`, s);
                     return s;
@@ -370,20 +395,30 @@ const phaseGate = defineWorkflow({
                     continue;
                 }
                 if (before !== after) {
+                    const changes = await ctx.step(`diff-of-${tag}`, () => git(["diff", "--no-index", "--",
+                        `${ART}/phase-${n}-before-review-${tag}.diff`, `${ART}/phase-${n}-after-review-${tag}.diff`], [1]));
                     await checkpoint(
                         `diff-changed-${tag}`,
                         "審査の前後で作業ツリーが変わった(この VERDICT は無効)",
-                        `${ART}/phase-${n}-before-review-${tag}.diff と after-review の差を確認する。\n無効にした判定(審査役の出力そのまま):\n${formatReview(review)}\n\nresume すると再審査する。`
+                        `審査の前後の採取結果の差(先頭):\n${changes.slice(0, 3000)}\n\n` +
+                        "審査役が書き換えたものなら、審査の前に戻してから resume する。\n" +
+                        "ビルドやテストが毎回作り直すファイル(生成物・キャッシュ・カバレッジなど)なら、.gitignore に足してから resume する" +
+                        "(足さないと、何度再審査しても食い違う)。\n\n" +
+                        `無効にした判定(審査役の出力そのまま):\n${formatReview(review)}\n\nresume すると再審査する。`
                     );
                     continue;
                 }
-                if (review.verdict !== "FAIL" && HEDGE.test(`${review.reportText}\n${review.conditions}`)) {
-                    await checkpoint(
+                if (review.verdict !== "FAIL" && HEDGE.test(`${ownWords(review.reportText)}\n${ownWords(review.conditions)}`)) {
+                    const hedgeNote = await checkpoint(
                         `hedge-${tag}`,
                         "PASS の結果に推測の語(おそらく・たぶん・はず)が含まれる(PASS に数えない)",
-                        `審査役の出力そのまま:\n${formatReview(review)}\n\nresume すると再審査する。`
+                        `審査役の出力そのまま:\n${formatReview(review)}\n\n` +
+                        "resume すると再審査する。語が推測ではない(引用・固有名など)と人が確かめたなら、" +
+                        `${ART}/phase-${n}-human-note-hedge-${tag}.md の 1 行目に「採用」と書いて resume すると、この判定をそのまま数える。`
                     );
-                    continue;
+                    if (!humanAccepts(hedgeNote)) continue;
+                    accepted.push(`推測の語を含む ${review.verdict} を人が採用(${tag})`);
+                    ctx.log(`[採用] ${accepted[accepted.length - 1]}`);
                 }
                 valid = true;
             }
@@ -416,21 +451,23 @@ const phaseGate = defineWorkflow({
         }
 
         ctx.phase("締め");
-        const status = await ctx.step("closing-status", () => git(["status", "--porcelain"]));
-        const changed = status.split(/\r?\n/).filter(Boolean).map((l) => l.slice(3).replace(/^"|"$/g, "").replace(/\\/g, "/"));
+        const entries = await ctx.step("closing-status-v2", () => changedFiles());
+        const status = entries.map((e) => `${e.code} ${e.file}`).join("\n");
+        const changed = entries.map((e) => e.file);
         const reported = new Set((finalImpl.changedFiles ?? []).map((f) => f.split(/\s+[—–]\s+|\s+-\s+/)[0].trim().replace(/^`|`$/g, "").replace(/\\/g, "/").replace(/^\.\//, "")));
-        const unreported = changed.filter((f) => !f.endsWith("/") && !reported.has(f));
+        const unreported = changed.filter((f) => !reported.has(f));
         const protectedTouched = changed.filter((f) => PROTECTED.some((re) => re.test(f)));
         const closing =
-            `差分の一覧(git status --porcelain):\n${status || "(なし)"}\n\n` +
-            `実装役の報告に無い変更ファイル(スコープ逸脱の候補。ディレクトリ単位の項目は人が確認):\n${unreported.join("\n") || "(なし)"}\n\n` +
+            `差分の一覧(git status --porcelain -uall。${ART}/ は除く):\n${status || "(なし)"}\n\n` +
+            `実装役の報告に無い変更ファイル(スコープ逸脱の候補):\n${unreported.join("\n") || "(なし)"}\n\n` +
             (PROTECTED.length ? `触ってはいけないファイルの変更:\n${protectedTouched.join("\n") || "(なし)"}\n\n` : "") +
             `審査結果(審査役の出力そのまま):\n${formatReview(finalVerdict)}\n\n` +
             "コミットはしない。TEST_REPORT.md の更新案と phase-log.csv の追記案は、resume 後に e2e-artifacts/ へ差分として出す。\n" +
             `人の介入時間(分)を ${ART}/phase-${n}-human-minutes.txt に数字だけで書いてから resume する。`;
         await checkpoint("closing", "PASS: 差分と審査結果の突き合わせ", closing);
 
-        return await record(ctx, n, prep, history.length, finalVerdict.verdict, `未検証: ${(finalVerdict.unverified ?? []).join(" / ") || "なし"}。逸脱候補: ${unreported.length}件`, finalVerdict, checkpoint);
+        const acceptedNote = accepted.length ? `。${accepted.join(" / ")}` : "";
+        return await record(ctx, n, prep, history.length, finalVerdict.verdict, `未検証: ${(finalVerdict.unverified ?? []).join(" / ") || "なし"}。逸脱候補: ${unreported.length}件${acceptedNote}`, finalVerdict, checkpoint);
     },
 });
 

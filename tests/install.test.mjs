@@ -57,11 +57,28 @@ test("二度目: 変更が無ければ何もしない。-Check も差分なし�
     install(dir);
     const harness = readFileSync(at(dir, "HARNESS.md"), "utf8");
     writeFileSync(at(dir, "HARNESS.md"), `${harness}\n育てた行\n`);
+    const before = readFileSync(at(dir, ".github", "copilot-user-harness.json"), "utf8");
     const r = install(dir);
     assert.equal(r.code, 0, r.out);
     assert.match(r.out, /変更なし/);
     assert.match(readFileSync(at(dir, "HARNESS.md"), "utf8"), /育てた行/, "種は上書きしない");
+    assert.equal(readFileSync(at(dir, ".github", "copilot-user-harness.json"), "utf8"), before, "管理ファイルを書き直さない(installedAt も変えない)");
     assert.equal(install(dir, "-Check").code, 0);
+});
+
+test("core.autocrlf=true の clone のように部品が CRLF になっていても、編集とは見なさない", { skip }, () => {
+    const dir = target();
+    install(dir);
+    const parts = Object.keys(manifest(dir).files).map((k) => at(dir, ...k.split("\\")));
+    for (const p of parts) writeFileSync(p, readFileSync(p, "utf8").replace(/\r?\n/g, "\r\n"));
+    const r = install(dir, "-Check");
+    assert.equal(r.code, 0, r.out);
+    assert.doesNotMatch(r.out, /スキップ/);
+    // CRLF でも中身を変えたら編集として扱う
+    writeFileSync(agent(dir), `${readFileSync(agent(dir), "utf8")}手で足した\r\n`);
+    const r2 = install(dir);
+    assert.equal(r2.code, 2, r2.out);
+    assert.match(r2.out, /スキップ\(配布後に編集されている.*implementer/);
 });
 
 test("配布後に編集した部品は上書きせず警告(2)。-Force なら上書きする", { skip }, () => {
