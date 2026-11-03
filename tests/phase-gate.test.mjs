@@ -458,3 +458,27 @@ test("サブエージェントの上限に届く前に止め、記録案を出�
     assert.equal(result.verdict, "中断(サブエージェント上限)");
     assert.match(result.phaseLogRow, /中断\(サブエージェント上限\)/);
 });
+
+test("入れ子のリポジトリ(未追跡の git init 済みフォルダ)の中を審査役が書き換えても、その判定を無効にする", async () => {
+    const repo = makeRepo();
+    let reviews = 0;
+    const { pauses, calls, result } = await drive(repo, { phase: 1 }, {
+        implementer: ({ repo }) => {
+            mkdirSync(join(repo, "sub"));
+            git(join(repo, "sub"), "init", "-q");
+            writeFileSync(join(repo, "sub", "f.txt"), "実装役が足した\n");
+            return implOk({ changedFiles: ["sub/"] });
+        },
+        reviewer: ({ repo }) => {
+            if (++reviews === 1) writeFileSync(join(repo, "sub", "f.txt"), "審査役が書き換えた\n");
+            return review("PASS");
+        },
+    }, (key, repo) => {
+        if (key === "cp:diff-changed-1-a1") writeFileSync(join(repo, "sub", "f.txt"), "実装役が足した\n");
+        writeMinutes(1)(key, repo);
+    });
+    assert.ok(pauses.includes("cp:diff-changed-1-a1"));
+    assert.match(readFileSync(art(repo, "phase-1-checkpoint-diff-changed-1-a1.md"), "utf8"), /sub\/f\.txt/);
+    assert.equal(calls.filter((c) => c.agent === "reviewer").length, 2);
+    assert.equal(result.verdict, "PASS");
+});

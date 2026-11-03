@@ -9,7 +9,7 @@
 #           追加以外の変更(書き換え・削除・名前の変更)があれば一覧を出す
 #   after : 同じものを e2e-artifacts/phase-N-after-review.snapshot に書き、before と比べる
 #   終了コード: 0 = 採取した(before)/ 一致(after)、1 = 不一致(その VERDICT は無効)、
-#               2 = 失敗(git リポジトリでない・before が無いなど)、3 = テストディレクトリに追加以外の変更がある(before)
+#               2 = 失敗(git リポジトリでない・before が無い・思わぬ例外など)、3 = テストディレクトリに追加以外の変更がある(before)
 #
 # e2e-artifacts/ は、gitignore に入っていなくても採取から外す(ここへ書く採取結果や審査役の証拠で、前後が必ず食い違うため)。
 # git の出力はバイトのまま扱う。コンソールのコードページを通すと、日本語のファイル名や Shift_JIS の中身が崩れる。
@@ -22,6 +22,11 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# 思わぬ例外も「失敗」(2)で終える。-File の既定では 1 になり、after の「不一致」と見分けられない
+trap {
+  Write-Output "失敗した: $_"
+  exit 2
+}
 $utf8 = New-Object Text.UTF8Encoding $false
 try { [Console]::OutputEncoding = $utf8 } catch { }
 
@@ -79,15 +84,27 @@ function Get-Changes {
   return $out
 }
 
+# 未追跡のファイル。git init 済みのフォルダ(入れ子のリポジトリ)は ls-files が「sub/」とフォルダごと返すので、
+# その中は入れ子のリポジトリ自身の ls-files で、追跡中と未追跡のファイルを 1 件ずつ拾う(その .gitignore に従う)
+function Get-UntrackedFiles([string]$Prefix) {
+  if ($Prefix) { $gitArgs = @('-C', $Prefix, '-c', 'core.quotePath=false', 'ls-files', '--cached', '--others', '--exclude-standard', '-z') }
+  else { $gitArgs = @('-c', 'core.quotePath=false', 'ls-files', '--others', '--exclude-standard', '-z') + $except }
+  foreach ($n in (Get-GitText $gitArgs).Split([char]0)) {
+    if (-not $n) { continue }
+    if ($n.EndsWith('/')) { Get-UntrackedFiles ($Prefix + $n) } else { $Prefix + $n }
+  }
+}
+
 function Get-Snapshot {
   $sha = [Security.Cryptography.SHA256]::Create()
   try {
-    $names = (Get-GitText (@('-c', 'core.quotePath=false', 'ls-files', '--others', '--exclude-standard', '-z') + $except)).Split([char]0) |
-      Where-Object { $_ }
-    $names = [string[]]@($names)
+    $names = [string[]]@(Get-UntrackedFiles '' | Select-Object -Unique)
     [Array]::Sort($names, [StringComparer]::Ordinal)
+    # 入れ子のリポジトリで消された追跡中のファイルや、フォルダを指すリンクは、中身の代わりに印を並べる
     $hashes = foreach ($n in $names) {
-      $bytes = [IO.File]::ReadAllBytes((Join-Path (Get-Location).Path $n))
+      $full = Join-Path (Get-Location).Path $n
+      if (-not [IO.File]::Exists($full)) { "(ファイルでない)  $n"; continue }
+      $bytes = [IO.File]::ReadAllBytes($full)
       (([BitConverter]::ToString($sha.ComputeHash($bytes))) -replace '-', '').ToLowerInvariant() + "  $n"
     }
   } finally { $sha.Dispose() }

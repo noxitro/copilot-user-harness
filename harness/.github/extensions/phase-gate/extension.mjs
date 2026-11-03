@@ -5,7 +5,7 @@
 import { defineWorkflow, joinSession } from "@github/copilot-sdk/extension";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const MAX_ROUNDS = 3; // 審査の差し戻しの上限(4 周目は始めない)
@@ -151,10 +151,23 @@ function prepare(n) {
 // 外さないと、ワークフロー自身や審査役が書く証拠で審査の前後が必ず食い違い、判定が毎回無効になる
 const EXCEPT_ART = ["--", ".", `:(exclude)${ART}`];
 
-// 未追跡のファイルは diff に出ず、status も「??」のまま変わらないので、中身のハッシュも並べる(gitignore 対象は除く)
+// 未追跡のファイル。git init 済みのフォルダ(入れ子のリポジトリ)は ls-files が「sub/」とフォルダごと返すので、
+// その中は入れ子のリポジトリ自身の ls-files で、追跡中と未追跡のファイルを 1 件ずつ拾う(その .gitignore に従う)
+function untrackedFiles(prefix = "") {
+    const args = prefix
+        ? ["-C", prefix, "ls-files", "--cached", "--others", "--exclude-standard", "-z"]
+        : ["ls-files", "--others", "--exclude-standard", "-z", ...EXCEPT_ART];
+    return git(args).split("\0").filter(Boolean).flatMap((f) => (f.endsWith("/") ? untrackedFiles(prefix + f) : [prefix + f]));
+}
+
+// 未追跡のファイルは diff に出ず、status も「??」のまま変わらないので、中身のハッシュも並べる(gitignore 対象は除く)。
+// 入れ子のリポジトリで消された追跡中のファイルや、フォルダを指すリンクは、中身の代わりに印を並べる
 function snapshot() {
-    const untracked = git(["ls-files", "--others", "--exclude-standard", "-z", ...EXCEPT_ART]).split("\0").filter(Boolean).sort();
-    const hashes = untracked.map((f) => `${createHash("sha256").update(readFileSync(path(f))).digest("hex")}  ${f}`).join("\n");
+    const untracked = [...new Set(untrackedFiles())].sort();
+    const hashes = untracked.map((f) => {
+        const isFile = statSync(path(f), { throwIfNoEntry: false })?.isFile();
+        return `${isFile ? createHash("sha256").update(readFileSync(path(f))).digest("hex") : "(ファイルでない)"}  ${f}`;
+    }).join("\n");
     return `${git(["diff", "HEAD", ...EXCEPT_ART])}\n--- git status --porcelain ---\n${git(["status", "--porcelain", ...EXCEPT_ART])}` +
         `\n--- untracked (sha256) ---\n${hashes}\n`;
 }

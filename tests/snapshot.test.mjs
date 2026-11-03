@@ -102,3 +102,25 @@ test("HARNESS.md のテストディレクトリが {{ }} のままなら見な�
     assert.equal(a.code, 2, a.out);
     assert.match(a.out, /審査前の採取が無い/);
 });
+
+test("入れ子のリポジトリ(未追跡の git init 済みフォルダ)があっても採取でき、その中の書き換えを拾う", { skip }, () => {
+    const repo = makeRepo();
+    mkdirSync(join(repo, "sub"));
+    git(join(repo, "sub"), "init", "-q");
+    writeFileSync(join(repo, "sub", "中身.txt"), "実装役が足した\n");
+    const b = snap(repo, "before");
+    assert.equal(b.code, 0, b.out);
+    writeFileSync(join(repo, "sub", "中身.txt"), "審査役が書き換えた\n");
+    const a = snap(repo, "after");
+    assert.equal(a.code, 1, a.out);
+    assert.match(a.out, /sub\/中身\.txt/);
+});
+
+test("思わぬ例外は失敗(2)で終え、after の不一致(1)と取り違えない", { skip }, () => {
+    const repo = makeRepo();
+    rmSync(join(repo, "HARNESS.md"));
+    mkdirSync(join(repo, "HARNESS.md")); // ファイルのつもりで読むと例外になる
+    const b = snap(repo, "before");
+    assert.equal(b.code, 2, b.out);
+    assert.match(b.out, /失敗した/);
+});
