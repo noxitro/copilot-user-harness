@@ -482,3 +482,23 @@ test("入れ子のリポジトリ(未追跡の git init 済みフォルダ)の�
     assert.equal(calls.filter((c) => c.agent === "reviewer").length, 2);
     assert.equal(result.verdict, "PASS");
 });
+
+test("Shift_JIS のファイルを審査役が書き換えても、UTF-8 として読むと同じに見える差でも、その判定を無効にする", async () => {
+    const repo = makeRepo();
+    // 「あ」(82 A0)と「ぃ」(82 A1)。UTF-8 として読むとどちらも U+FFFD 2 つになるが、git diff の index 行(blob のハッシュ)が違う
+    const sjis = (b) => (repo) => writeFileSync(join(repo, "README.md"), Buffer.from([0x82, b, 0x0a]));
+    let reviews = 0;
+    const { pauses, calls, result } = await drive(repo, { phase: 1 }, {
+        implementer: ({ repo }) => { sjis(0xa0)(repo); return implOk(); },
+        reviewer: ({ repo }) => {
+            if (++reviews === 1) sjis(0xa1)(repo);
+            return review("PASS");
+        },
+    }, (key, repo) => {
+        if (key === "cp:diff-changed-1-a1") sjis(0xa0)(repo);
+        writeMinutes(1)(key, repo);
+    });
+    assert.ok(pauses.includes("cp:diff-changed-1-a1"));
+    assert.equal(calls.filter((c) => c.agent === "reviewer").length, 2);
+    assert.equal(result.verdict, "PASS");
+});
