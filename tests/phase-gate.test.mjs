@@ -502,3 +502,55 @@ test("Shift_JIS のファイルを審査役が書き換えても、UTF-8 とし�
     assert.equal(calls.filter((c) => c.agent === "reviewer").length, 2);
     assert.equal(result.verdict, "PASS");
 });
+
+test("PASS(条件付き)なのに条件が空なら数えず、再審査する", async () => {
+    const repo = makeRepo();
+    let reviews = 0;
+    const { pauses, calls, result } = await drive(repo, { phase: 1 }, {
+        implementer: ({ repo }) => { appendReadme(repo, "行"); return implOk(); },
+        reviewer: () => (++reviews === 1 ? review("PASS(条件付き)", { conditions: " " }) : review("PASS(条件付き)", { conditions: "Windows でだけ確かめた" })),
+    }, writeMinutes(1));
+    assert.deepEqual(pauses, ["cp:cond-empty-1-a1", "cp:closing"]);
+    assert.equal(calls.filter((c) => c.agent === "reviewer").length, 2);
+    assert.equal(result.verdict, "PASS(条件付き)");
+});
+
+test("審査役が null を返しても、審査の前後で作業ツリーが変わっていればそれを見せる", async () => {
+    const repo = makeRepo();
+    let reviews = 0;
+    const { pauses, calls, result } = await drive(repo, { phase: 1 }, {
+        implementer: ({ repo }) => { appendReadme(repo, "行"); return implOk(); },
+        reviewer: ({ repo }) => {
+            if (++reviews === 1) { writeFileSync(join(repo, "stray.txt"), "途中まで書いた"); return null; }
+            return review("PASS");
+        },
+    }, (key, repo) => {
+        if (key === "cp:diff-changed-1-a1") rmSync(join(repo, "stray.txt"));
+        writeMinutes(1)(key, repo);
+    });
+    assert.deepEqual(pauses, ["cp:diff-changed-1-a1", "cp:closing"]);
+    const cp = readFileSync(art(repo, "phase-1-checkpoint-diff-changed-1-a1.md"), "utf8");
+    assert.match(cp, /stray\.txt/);
+    assert.match(cp, /null/, "審査役が結果を返さなかったことも見せる");
+    assert.equal(calls.filter((c) => c.agent === "reviewer").length, 2);
+    assert.equal(result.verdict, "PASS");
+});
+
+test("テストの変更の承認待ちの間に人がテストを直したら、古い差分のまま承認せず、今の差分で聞き直す", async () => {
+    const repo = makeRepo({ testDir: true });
+    const { result, calls, pauses } = await drive(repo, { phase: 1 }, {
+        implementer: ({ repo }) => { writeFileSync(testFile(repo), "assert(1 === 1, '理由を足した');\n"); return implOk({ changedFiles: ["tests/a.test.js"] }); },
+        reviewer: () => review("PASS"),
+    }, (key, repo) => {
+        if (key === "cp:test-changed-1") {
+            writeFileSync(testFile(repo), "// 人が止めた\n");
+            writeFileSync(art(repo, "phase-1-human-note-test-changed-1.md"), "採用\n");
+        }
+        if (key === "cp:test-changed-1-2") writeFileSync(art(repo, "phase-1-human-note-test-changed-1-2.md"), "採用\n");
+        writeMinutes(1)(key, repo);
+    });
+    assert.deepEqual(pauses, ["cp:test-changed-1", "cp:test-changed-1-2", "cp:closing"]);
+    assert.match(readFileSync(art(repo, "phase-1-checkpoint-test-changed-1-2.md"), "utf8"), /\+\/\/ 人が止めた/, "今の差分を見せる");
+    assert.equal(calls.filter((c) => c.agent === "reviewer").length, 1);
+    assert.equal(result.verdict, "PASS");
+});

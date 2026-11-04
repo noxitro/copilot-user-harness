@@ -76,6 +76,7 @@ description: Use when asked to run, advance, resume or re-review a phase of HARN
 守ること:
 
 - 実装役と審査役を同じチャットの自分で兼ねない。必ずカスタムエージェント `implementer` / `reviewer` に委譲する。
+- 条件が書かれていない「PASS(条件付き)」を PASS に数えない(条件を書かせて再審査する)。
 - 審査役自身の文章に「おそらく」「はず」を含む結果を PASS に数えない(コードブロックに入った生出力やテスト名は対象外)。
   推測ではないと私が判断したときだけ数える。
 - 審査役の判定文を書き換えない。要約するときも VERDICT の語と FAIL の項目数は変えない。

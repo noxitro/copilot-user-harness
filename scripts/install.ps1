@@ -116,6 +116,37 @@ $seeds = @(
   @{ src = (Join-Path $harnessDir 'docs\acceptance-checklist.md'); dst = 'docs\acceptance-checklist.md' }
 )
 
+# 配布先の中のリンク(ジャンクション・シンボリックリンク)は、文字列の上では配布先の中を指すパスでも、
+# たどると配布先の外のファイルを書き換え・削除しかねない。触るパスの途中や .github\ の奥にあれば、何もせずに止める。
+# GetAttributes はリンクをたどらず、リンク自身の属性を返す(リンク先が無くても読める)
+function Test-Reparse([string]$full) {
+  try { return [bool]([IO.File]::GetAttributes($full) -band [IO.FileAttributes]::ReparsePoint) } catch { return $false }
+}
+function Get-ReparseOnPath([string]$rel) {
+  $cur = $Target.TrimEnd('\')
+  foreach ($part in ($rel -split '[\\/]')) {
+    if (-not $part) { continue }
+    $cur = Join-Path $cur $part
+    if (Test-Reparse $cur) { return $cur }
+  }
+}
+function Get-ReparseUnder([string]$dir) {
+  if (-not [IO.Directory]::Exists($dir)) { return }
+  foreach ($e in [IO.Directory]::GetFileSystemEntries($dir)) {
+    if (Test-Reparse $e) { $e } elseif ([IO.Directory]::Exists($e)) { Get-ReparseUnder $e }
+  }
+}
+$touchRels = @($desired.Keys) + @($recorded.Keys) + @($seeds | ForEach-Object { $_.dst }) + @($manifestRel)
+$links = @($touchRels | ForEach-Object { Get-ReparseOnPath $_ })
+$githubTarget = Join-Path $Target '.github'
+if (-not (Test-Reparse $githubTarget)) { $links += @(Get-ReparseUnder $githubTarget) }
+$links = @($links | Where-Object { $_ } | Select-Object -Unique)
+if ($links.Count) {
+  Write-Host '配布先の中にリンク(ジャンクション・シンボリックリンク)があるので、何もせずに止めた(たどると配布先の外を書き換えかねない):'
+  $links | ForEach-Object { Write-Host "  $_" }
+  exit 1
+}
+
 $actions = New-Object System.Collections.Generic.List[string]
 $warnings = New-Object System.Collections.Generic.List[string]
 foreach ($r in $rejected) { $warnings.Add("無視した(管理ファイルのパスが .github\ の外を指している): $r") }

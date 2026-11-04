@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -173,4 +173,33 @@ test("管理ファイルのパスが配布先の外を指していたら、そ�
     assert.ok(existsSync(outside), "配布先の外のファイルが残っている");
     assert.ok(!existsSync(agent(dir)), "配布先の中の部品は消えている");
     rmSync(outside);
+});
+
+test("配布先の .github や docs がジャンクションなら、たどって外を書き換えず、何もせずに 1", { skip }, () => {
+    const outside = mkdtempSync(join(scratch, "outside-"));
+    writeFileSync(join(outside, "大事.txt"), "外のファイル\n");
+    for (const link of [".github", "docs"]) {
+        const dir = target();
+        const r0 = spawnSync("cmd.exe", ["/c", "mklink", "/J", at(dir, link), outside], { encoding: "utf8" });
+        assert.equal(r0.status, 0, r0.stdout + r0.stderr);
+        for (const args of [[], ["-Force"], ["-Remove", "-Force"]]) {
+            const r = install(dir, ...args);
+            assert.equal(r.code, 1, r.out);
+            assert.match(r.out, /リンク/);
+        }
+        assert.deepEqual(readdirSync(outside), ["大事.txt"], `${link}: 外に何も足さず、何も消さない`);
+    }
+});
+
+test("配布先の .github の奥にリンクがあっても、何もせずに 1", { skip }, () => {
+    const outside = mkdtempSync(join(scratch, "outside-"));
+    const dir = target();
+    install(dir);
+    mkdirSync(at(dir, ".github", "deep"));
+    const r0 = spawnSync("cmd.exe", ["/c", "mklink", "/J", at(dir, ".github", "deep", "j"), outside], { encoding: "utf8" });
+    assert.equal(r0.status, 0, r0.stdout + r0.stderr);
+    const r = install(dir, "-Remove");
+    assert.equal(r.code, 1, r.out);
+    assert.ok(existsSync(agent(dir)), "部品を消していない");
+    assert.ok(existsSync(outside));
 });

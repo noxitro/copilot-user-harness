@@ -413,7 +413,7 @@ const phaseGate = defineWorkflow({
             }
 
             // テストディレクトリの追加以外の変更は、審査役の注意力に頼らず、審査の前にコードで止める
-            const tc = await ctx.step(`test-changes-${attempts}`, () => {
+            const inspectTests = (key) => ctx.step(key, () => {
                 const list = changedFiles().filter((e) => isTestChange(e, prep.testDirs));
                 if (!list.length) return { list: [], key: "", diff: "" };
                 const files = list.flatMap((e) => [e.file, e.from].filter(Boolean));
@@ -421,27 +421,40 @@ const phaseGate = defineWorkflow({
                 const lines = list.map(formatEntry);
                 return { list: lines, key: createHash("sha256").update(`${lines.join("\n")}\n${diff}`).digest("hex"), diff };
             });
-            if (tc.list.length && !acceptedTests.has(tc.key)) {
+            let tc = await inspectTests(`test-changes-${attempts}`);
+            let testsRejected = false;
+            // 止まっている間に人がテストを直すこともあるので、「採用」の後に取り直し、見せた差分と違えば今の差分で聞き直す
+            // (取り直しは止まった後の初めての step なので、再開した時点の作業ツリーを読む)
+            for (let ask = 1; tc.list.length && !acceptedTests.has(tc.key); ask++) {
                 const dirs = prep.testDirs.join(" ");
-                const testNote = await checkpoint(`test-changed-${attempts}`, "テストディレクトリに追加以外の変更がある(既定で FAIL)",
+                const cpKey = ask === 1 ? `test-changed-${attempts}` : `test-changed-${attempts}-${ask}`;
+                const testNote = await checkpoint(cpKey, "テストディレクトリに追加以外の変更がある(既定で FAIL)",
                     `テストディレクトリ(HARNESS.md の「環境」節): ${dirs}\n\n変更(追加は除く):\n${tc.list.join("\n")}\n\n差分(先頭):\n${tc.diff.slice(0, 3000)}\n\n` +
                     "人が承認するなら、docs/TEST_REPORT.md の「テスト変更の承認記録」に行を足し、" +
-                    `${ART}/phase-${n}-human-note-test-changed-${attempts}.md の 1 行目に「採用」と書いて resume する(審査に進む)。\n` +
+                    `${ART}/phase-${n}-human-note-${cpKey}.md の 1 行目に「採用」と書いて resume する(審査に進む)。\n` +
                     "それ以外で resume すると、テストの変更を戻すよう実装役に差し戻す(1 周に数える。note に書いたことは人の指示として渡す)。");
                 if (humanAccepts(testNote)) {
+                    const now = await inspectTests(`test-changes-${attempts}-after-${ask}`);
+                    if (now.key !== tc.key) {
+                        ctx.log(`[聞き直し] ${cpKey} で見せた後にテストの差分が変わった`);
+                        tc = now;
+                        continue;
+                    }
                     acceptedTests.add(tc.key);
                     accepted.push(`テストの変更を人が承認(${attempts})`);
                     ctx.log(`[採用] ${accepted[accepted.length - 1]}`);
-                    approvedTests = `テストディレクトリの次の変更は、人がチェックポイント test-changed-${attempts} で承認した` +
+                    approvedTests = `テストディレクトリの次の変更は、人がチェックポイント ${cpKey} で承認した` +
                         `(承認記録の行が今回の差分で足されていても、人が書いたものとして扱う):\n${tc.list.join("\n")}\n\n`;
                 } else {
                     const item = `テストディレクトリ(${dirs})の追加以外の変更を戻す: ${tc.list.join(", ")}`;
                     history.push({ round, verdict: "FAIL(テストの変更。審査の前にコードで検出)", items: [item] });
                     fixItems = formatFix([{ priority: 1, item, reproduction: `git status --porcelain -- ${dirs} と git diff HEAD -- ${dirs} で、追加以外の変更が無いことを確かめる` }]);
                     notes = testNote;
-                    continue;
+                    testsRejected = true;
+                    break;
                 }
             }
+            if (testsRejected) continue;
 
             // 審査前後の差分を比べる。違えば無効にして人に見せる
             let review = null;
@@ -476,10 +489,7 @@ const phaseGate = defineWorkflow({
                     return s;
                 });
 
-                if (!review) {
-                    await checkpoint(`review-null-${tag}`, "審査役の判定が得られなかった(null)", "サブエージェントの失敗(AI クレジットの枠切れ・上限・接続など)は null で返る。原因を解消してから resume すると再審査する。");
-                    continue;
-                }
+                // null でも前後は比べる。途中まで動いた審査役の書き換えを、次の審査前の採取に紛れ込ませない
                 if (before !== after) {
                     const changes = await ctx.step(`diff-of-${tag}`, () => git(["diff", "--no-index", "--",
                         `${ART}/phase-${n}-before-review-${tag}.diff`, `${ART}/phase-${n}-after-review-${tag}.diff`], [1]));
@@ -490,8 +500,17 @@ const phaseGate = defineWorkflow({
                         "審査役が書き換えたものなら、審査の前に戻してから resume する。\n" +
                         "ビルドやテストが毎回作り直すファイル(生成物・キャッシュ・カバレッジなど)なら、.gitignore に足してから resume する" +
                         "(足さないと、何度再審査しても食い違う)。\n\n" +
-                        `無効にした判定(審査役の出力そのまま):\n${formatReview(review)}\n\nresume すると再審査する。`
+                        `無効にした判定(審査役の出力そのまま):\n${review ? formatReview(review) : "(審査役は結果を返さなかった: null)"}\n\nresume すると再審査する。`
                     );
+                    continue;
+                }
+                if (!review) {
+                    await checkpoint(`review-null-${tag}`, "審査役の判定が得られなかった(null)", "サブエージェントの失敗(AI クレジットの枠切れ・上限・接続など)は null で返る。原因を解消してから resume すると再審査する。");
+                    continue;
+                }
+                if (review.verdict === "PASS(条件付き)" && !String(review.conditions ?? "").trim()) {
+                    await checkpoint(`cond-empty-${tag}`, "PASS(条件付き)なのに条件が空(PASS に数えない)",
+                        `審査役の出力そのまま:\n${formatReview(review)}\n\nresume すると再審査する(条件を書かせる)。`);
                     continue;
                 }
                 if (review.verdict !== "FAIL" && HEDGE.test(`${ownWords(review.reportText)}\n${ownWords(review.conditions)}`)) {
